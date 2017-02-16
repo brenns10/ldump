@@ -1,0 +1,6 @@
+ldap3
+matplotlib
+pandas
+numpy
+ipython
+jupyter
