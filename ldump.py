@@ -3,6 +3,7 @@ CWRU LDAP Dumper - download lots of student/faculty data in order to import
 them into CWRU Love.
 """
 
+import collections
 import csv
 import ldap3
 import pickle
@@ -13,84 +14,74 @@ DEFAULT_PHOTO = 'https://placehold.it/100x100'
 ADDRESS = 'ldap.case.edu'
 PORT = 389
 BASE = 'ou=People,o=cwru.edu,o=isp'
-ATTR = ldap3.ALL_ATTRIBUTES
+ATTR = ['uid', 'sn', 'givenName', 'mail', 'cwruEduPersonScopedAffiliation',
+        'cwruEduPersonScopedAffiliationLastSeen']
+
+STUDENT_QUERY = '(cwruEduPersonScopedAffiliation=student@case.edu)'
+UNDERGRAD_QUERY = '(cwruEduPersonScopedAffiliation=undergrad-student@case.edu)'
+GRAD_QUERY = '(cwruEduPersonScopedAffiliation=grad-student@*case.edu)'
+FACULTY_QUERY = '(cwruEduPersonScopedAffiliation=faculty@case.edu)'
+STAFF_QUERY = '(cwruEduPersonScopedAffiliation=staff@case.edu)'
+ALUM_QUERY = '(&(cwruEduPersonScopedAffiliation=alum@case.edu)(!(cwruEduPersonScopedAffiliation=student@case.edu)))'
+
+QUERIES = [
+    ('Grad Student', GRAD_QUERY),
+    ('Undergrad', UNDERGRAD_QUERY),
+    ('Faculty', FACULTY_QUERY),
+    ('Staff', STAFF_QUERY),
+]
+
+Entry = collections.namedtuple('Entry', ['username', 'first_name', 'last_name', 'department', 'photo_url'])
+
+
+def search(c, query):
+    return c.extend.standard.paged_search(BASE, query, ldap3.SUBTREE,
+                                          paged_size=1000, generator=True,
+                                          attributes=ATTR)
+
+
+def add_results(c, department, query, entries, ids):
+    print('Adding from department ' + department + '...')
+    old_len = len(entries)
+    count = 0
+    for result in search(c, query):
+        count += 1
+        result = result['attributes']
+        if result['uid'][0] not in ids:
+            ids.add(result['uid'][0])
+            entries.append(Entry(
+                username=result['uid'][0],
+                first_name=result['givenName'][0],
+                last_name=result['sn'][0],
+                department=department,
+                photo_url='',
+            ))
+    print('Got %d results from query.' % count)
+    added = len(entries) - old_len
+    print('%d were newly added, %d must have been overlap' % (added, count-added))
+    print('We now have %d entries in the list.' % len(entries))
+
+
+def write_csv_results(entries, output='employees.csv'):
+    with open(output, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(('username', 'first_name', 'last_name', 'department', 'photo_url'))
+        for entry in entries:
+            writer.writerow(entry)
 
 
 def ldump():
     """
-    Performs a search for every uid. The search is paged (receiving 1000
-    results per page). An output file is written every 1000 results:
-    attributes.1000.pkl, attributes.2000.pkl, etc. These need to be combined
-    afterwards for analysis.
+    Searches for students, faculty, and staff, and saves them all.
     """
-    search = '(uid=*)'
     c = ldap3.Connection(ldap3.Server(ADDRESS, PORT))
     c.open()
-    gen = c.extend.standard.paged_search(BASE, search, ldap3.SUBTREE,
-                                         paged_size=1000, generator=True,
-                                         attributes=ATTR)
-    count = 0
-    chunk = []
-    for entry in gen:
-        count += 1
-        chunk.append(entry['attributes'])
-
-        if count % 1000 == 0:
-            print('count=%d' % count)
-            with open('attributes.%d.pkl' % count, 'wb') as pklfile:
-                pickle.dump(chunk, pklfile)
-            chunk = []
+    entries = []
+    ids = set()
+    for dept, query, in QUERIES:
+        add_results(c, dept, query, entries, ids)
+    write_csv_results(entries)
     c.unbind()
-
-
-def combine(maximum=278000):
-    """
-    Combine the files produced by ldump into a single one. The major
-    performance barrier here is memory, and so we do a lot of explicit deleting
-    so that we don't run out.
-    """
-    all_attributes = []
-    for count in range(1000, maximum + 1, 1000):
-        name = 'attributes.%d.pkl' % count
-        with open(name, 'rb') as pklfile:
-            chunk = pickle.load(pklfile)
-        all_attributes_new = chunk + all_attributes
-        del chunk
-        del all_attributes
-        all_attributes = all_attributes_new
-        print(name)
-    return all_attributes
-
-
-def tocsv(fn='attributes.pkl', out='employees.csv'):
-    """
-    (deprecated) Take a combined pickle file and create a CSV for import into
-    Love. This produces *a lot* of data, and so the resulting CSV was too big
-    to import. More sophisticated filtering and experimentation can be found in
-    Students.ipynb.
-    """
-    with open(fn, 'rb') as f:
-        attribs = pickle.load(f)
-    with open(out, 'w') as csvfile:
-        writer = csv.writer(csvfile, delimiter=',')
-        writer.writerow(['username', 'first_name', 'last_name', 'department', 'photo_url'])
-        for entry in attribs:
-            try:
-                username = entry['uid'][0]
-                first_name = entry['givenName'][0]
-                last_name = entry['sn'][0]
-                department = ''
-                affil = entry.get('cwruEduPersonScopedAffiliation')
-                if 'student@case.edu' in affil:
-                    department = 'Student'
-                elif 'faculty@case.edu' in affil:
-                    department = 'Faculty'
-                elif 'alum@case.edu' in affil:
-                    department = 'Alumni'
-                writer.writerow((username, first_name, last_name, department, DEFAULT_PHOTO))
-            except Exception as e:
-                traceback.print_exc()
-                print(entry)
 
 
 if __name__ == '__main__':
